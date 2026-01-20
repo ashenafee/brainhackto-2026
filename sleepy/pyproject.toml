@@ -1,0 +1,14 @@
+[project]
+name = "sleepy"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "altair>=6.0.0",
+    "sleepfm",
+    "streamlit>=1.53.0",
+]
+
+[tool.uv.sources]
+sleepfm = { path = "../sleepfm", editable = true }
