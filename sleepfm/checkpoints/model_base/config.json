@@ -32,10 +32,5 @@
     "sampling_duration": 5,
     "sampling_freq": 128,
     "patch_size": 640,
-    "modality_types": [
-        "BAS",
-        "RESP",
-        "EKG",
-        "EMG"
-    ]
+    "modality_types": ["BAS", "RESP", "EKG", "EMG"]
 }
