@@ -7,7 +7,16 @@ authors = [
     { name = "Ashenafee Mandefro", email = "ashenafeem@gmail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "einops>=0.8.1",
+    "h5py>=3.15.1",
+    "loguru>=0.7.3",
+    "numpy>=2.4.1",
+    "pandas>=2.3.3",
+    "pyyaml>=6.0.3",
+    "torch>=2.9.1",
+    "tqdm>=4.67.1",
+]
 
 [project.scripts]
 sleepfm = "sleepfm:main"
