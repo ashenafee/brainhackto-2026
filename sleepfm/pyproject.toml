@@ -1,0 +1,17 @@
+[project]
+name = "sleepfm"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Ashenafee Mandefro", email = "ashenafeem@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+sleepfm = "sleepfm:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
