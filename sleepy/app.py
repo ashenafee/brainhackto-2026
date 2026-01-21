@@ -16,14 +16,17 @@ from sleepfm.preprocessing.preprocessing import EDFToHDF5Converter
 # Helper Functions
 # -----------------------------------------------------------------------------
 
+FOUNDATION_MODEL_PATH = "../sleepfm/checkpoints/model_base"
+STAGING_MODEL_PATH = "../sleepfm/checkpoints/model_sleep_staging"
+DIAGNOSIS_MODEL_PATH = "../sleepfm/checkpoints/model_diagnosis"
 
-def load_foundation_model(model_dir, device):
+def load_foundation_model(device):
     """Loads the SleepFM Foundation Model (SetTransformer)."""
-    config_path = os.path.join(model_dir, "config.json")
-    checkpoint_path = os.path.join(model_dir, "best.pt")
+    config_path = os.path.join(FOUNDATION_MODEL_PATH, "config.json")
+    checkpoint_path = os.path.join(FOUNDATION_MODEL_PATH, "best.pt")
 
     if not os.path.exists(config_path) or not os.path.exists(checkpoint_path):
-        st.error("Model config or checkpoint not found. Please check the path.")
+        st.error(f"Model config {config_path} or checkpoint {checkpoint_path} not found. Please check the path.")
         return None, None
 
     with open(config_path, "r") as f:
@@ -54,13 +57,15 @@ def load_foundation_model(model_dir, device):
     return model, config
 
 
-def load_staging_model(model_dir, device):
+def load_staging_model(device):
     """Loads the Sleep Staging Classifier."""
-    config_path = os.path.join(model_dir, "config.json")
-    checkpoint_path = os.path.join(model_dir, "best.pth")
+    config_path = os.path.join(STAGING_MODEL_PATH, "config.json")
+    checkpoint_path = os.path.join(STAGING_MODEL_PATH, "best.pt")
 
     if not os.path.exists(config_path) or not os.path.exists(checkpoint_path):
-        st.error("Staging model config or checkpoint not found.")
+        # st.error("Staging model config or checkpoint not found.")
+        st.error(f"Model config {config_path} or checkpoint {checkpoint_path} not found. Please check the path.")
+        
         return None
 
     with open(config_path, "r") as f:
@@ -551,156 +556,160 @@ if uploaded_file is not None:
         # ---------------------------------------------------------------------
         st.header("🧠 Sleep Stage Analysis")
 
-        # 3. Embedding Generation
-        st.text("Loading Foundation Model & Generating Embeddings...")
+        foundation_model_tab, sleep_staging_tab, diagnostic_tab = st.tabs(["Foundation model", "Sleep staging", "Diagnostic"])
+        
+        with foundation_model_tab:
 
-        foundation_model, fm_config = load_foundation_model(base_model_path, device)
+            # 3. Embedding Generation
+            st.text("Loading Foundation Model & Generating Embeddings...")
 
-        if foundation_model:
-            # Prepare tensors
-            # Shape: (Batch, 1, Samples) - Model expects (B, C, T)
-            t_bas = (
-                torch.tensor(epoch_data["bas"], dtype=torch.float)
-                .unsqueeze(1)
-                .to(device)
-            )
-            t_resp = (
-                torch.tensor(epoch_data["resp"], dtype=torch.float)
-                .unsqueeze(1)
-                .to(device)
-            )
-            t_ekg = (
-                torch.tensor(epoch_data["ekg"], dtype=torch.float)
-                .unsqueeze(1)
-                .to(device)
-            )
-            t_emg = (
-                torch.tensor(epoch_data["emg"], dtype=torch.float)
-                .unsqueeze(1)
-                .to(device)
-            )
+            foundation_model, fm_config = load_foundation_model(device)
 
-            # Create dummy masks (assuming all data is valid for this demo)
-            # Mask shape logic from generate_embeddings.py seems to imply boolean mask
-            # Here we create a mask of False (no padding)
-            mask = torch.zeros((num_epochs, 1), dtype=torch.bool).to(device)
+            if foundation_model:
+                # Prepare tensors
+                # Shape: (Batch, 1, Samples) - Model expects (B, C, T)
+                t_bas = (
+                    torch.tensor(epoch_data["bas"], dtype=torch.float)
+                    .unsqueeze(1)
+                    .to(device)
+                )
+                t_resp = (
+                    torch.tensor(epoch_data["resp"], dtype=torch.float)
+                    .unsqueeze(1)
+                    .to(device)
+                )
+                t_ekg = (
+                    torch.tensor(epoch_data["ekg"], dtype=torch.float)
+                    .unsqueeze(1)
+                    .to(device)
+                )
+                t_emg = (
+                    torch.tensor(epoch_data["emg"], dtype=torch.float)
+                    .unsqueeze(1)
+                    .to(device)
+                )
 
-            batch_size = 16
-            embeddings_list = []
+                # Create dummy masks (assuming all data is valid for this demo)
+                # Mask shape logic from generate_embeddings.py seems to imply boolean mask
+                # Here we create a mask of False (no padding)
+                mask = torch.zeros((num_epochs, 1), dtype=torch.bool).to(device)
 
-            progress_bar = st.progress(0)
+                batch_size = 16
+                embeddings_list = []
 
-            with torch.no_grad():
-                for i in range(0, num_epochs, batch_size):
-                    end = min(i + batch_size, num_epochs)
-
-                    # Get batch
-                    b_bas = t_bas[i:end]
-                    b_resp = t_resp[i:end]
-                    b_ekg = t_ekg[i:end]
-                    b_emg = t_emg[i:end]
-                    b_mask = mask[i:end]
-
-                    # Forward pass for each modality
-                    # Model returns (x, embedding). We want the embedding (index 1)
-                    # Note: generate_embeddings.py uses index 1 for 5-min agg, index 0 for granular
-                    # Staging usually uses the granular sequence or aggregated.
-                    # Based on notebook: "embeddings_new = [e[0].unsqueeze(1) for e in embeddings]" for granular
-
-                    emb_bas = foundation_model(b_bas, b_mask)[1]
-                    emb_resp = foundation_model(b_resp, b_mask)[1]
-                    emb_ekg = foundation_model(b_ekg, b_mask)[1]
-                    emb_emg = foundation_model(b_emg, b_mask)[1]
-
-                    # Stack modalities: (Batch, Seq, Embed) -> (Batch, Modalities*Seq, Embed) ??
-                    # Or simply concatenate. The Staging model expects a specific input structure.
-                    # In the notebook, it saves separate HDF5 datasets per modality.
-                    # The staging dataset loader usually concatenates them.
-
-                    # For simplicity in this app, we concatenate along the sequence dimension
-                    # or feature dimension depending on how the staging model was trained.
-                    # Assuming Staging Model takes (Batch, Modalities, Seq, Embed) or similar.
-                    # Let's look at SleepEventLSTMClassifier forward: input x is (B, C, S, E).
-
-                    batch_emb = torch.stack(
-                        [emb_bas, emb_resp, emb_ekg, emb_emg], dim=1
-                    )
-                    embeddings_list.append(batch_emb)
-
-                    progress_bar.progress(end / num_epochs)
-
-            full_embeddings = torch.cat(
-                embeddings_list, dim=0
-            )  # (Total_Epochs, 4, Seq, Embed)
-
-            # 4. Staging Inference
-            st.text("Predicting Sleep Stages...")
-            staging_model = load_staging_model(staging_model_path, device)
-
-            if staging_model:
-                predictions = []
-
-                # Create padded matrix mask for staging model
-                # Shape: (Batch, Modalities, Seq)
-                # Since we have no padding, it's all False (valid)
-                B, C, S, E = full_embeddings.shape
-                padded_matrix = torch.zeros((B, C, S), dtype=torch.bool).to(device)
+                progress_bar = st.progress(0)
 
                 with torch.no_grad():
-                    # Process in batches
-                    for i in range(0, B, batch_size):
-                        end = min(i + batch_size, B)
-                        batch_x = full_embeddings[i:end]
-                        batch_pad = padded_matrix[i:end]
+                    for i in range(0, num_epochs, batch_size):
+                        end = min(i + batch_size, num_epochs)
 
-                        outputs, _ = staging_model(batch_x, batch_pad)
-                        # outputs shape: (Batch, Seq, Num_Classes) -> We likely want the classification for the epoch
-                        # Usually sleep staging is one label per 30s epoch.
-                        # If the model returns sequence, we might average or take last.
-                        # However, standard SleepFM staging usually outputs (Batch, Num_Classes) if configured for epoch classification
-                        # OR (Batch, Seq, Num_Classes) if dense.
-                        # Let's assume the model outputs (Batch, Num_Classes) based on the `fc` layer in `model.py`
-                        # Wait, `model.py` LSTM returns (B, S, num_classes).
-                        # We will take the mean over the sequence dimension S for the epoch label.
+                        # Get batch
+                        b_bas = t_bas[i:end]
+                        b_resp = t_resp[i:end]
+                        b_ekg = t_ekg[i:end]
+                        b_emg = t_emg[i:end]
+                        b_mask = mask[i:end]
 
-                        logits = outputs.mean(dim=1)
-                        preds = torch.argmax(logits, dim=1).cpu().numpy()
-                        predictions.extend(preds)
+                        # Forward pass for each modality
+                        # Model returns (x, embedding). We want the embedding (index 1)
+                        # Note: generate_embeddings.py uses index 1 for 5-min agg, index 0 for granular
+                        # Staging usually uses the granular sequence or aggregated.
+                        # Based on notebook: "embeddings_new = [e[0].unsqueeze(1) for e in embeddings]" for granular
 
-                st.success("Analysis Complete!")
+                        emb_bas = foundation_model(b_bas, b_mask)[1]
+                        emb_resp = foundation_model(b_resp, b_mask)[1]
+                        emb_ekg = foundation_model(b_ekg, b_mask)[1]
+                        emb_emg = foundation_model(b_emg, b_mask)[1]
 
-                # Map predictions to labels
-                stage_map = {0: "Wake", 1: "N1", 2: "N2", 3: "N3", 4: "REM"}
-                mapped_stages = [stage_map.get(p, "Unknown") for p in predictions]
+                        # Stack modalities: (Batch, Seq, Embed) -> (Batch, Modalities*Seq, Embed) ??
+                        # Or simply concatenate. The Staging model expects a specific input structure.
+                        # In the notebook, it saves separate HDF5 datasets per modality.
+                        # The staging dataset loader usually concatenates them.
 
-                df_hypno = pd.DataFrame(
-                    {"Epoch": range(len(mapped_stages)), "Stage": mapped_stages}
-                )
+                        # For simplicity in this app, we concatenate along the sequence dimension
+                        # or feature dimension depending on how the staging model was trained.
+                        # Assuming Staging Model takes (Batch, Modalities, Seq, Embed) or similar.
+                        # Let's look at SleepEventLSTMClassifier forward: input x is (B, C, S, E).
 
-                # Visualization
-                st.subheader("Patient Hypnogram")
+                        batch_emb = torch.stack(
+                            [emb_bas, emb_resp, emb_ekg, emb_emg], dim=1
+                        )
+                        embeddings_list.append(batch_emb)
 
-                # Custom sorting for Y-axis to make Hypnogram look standard (Wake at top)
-                stage_order = ["Wake", "REM", "N1", "N2", "N3"]
+                        progress_bar.progress(end / num_epochs)
 
-                chart = (
-                    alt.Chart(df_hypno)
-                    .mark_point()
-                    .encode(
-                        x=alt.X("Epoch:Q", title="Epoch"),
-                        y=alt.Y("Stage:O", sort=stage_order, title="Stage"),
+                full_embeddings = torch.cat(
+                    embeddings_list, dim=0
+                )  # (Total_Epochs, 4, Seq, Embed)
+
+                # 4. Staging Inference
+                st.text("Predicting Sleep Stages...")
+                staging_model = load_staging_model(device)
+
+                if staging_model:
+                    predictions = []
+
+                    # Create padded matrix mask for staging model
+                    # Shape: (Batch, Modalities, Seq)
+                    # Since we have no padding, it's all False (valid)
+                    B, C, S, E = full_embeddings.shape
+                    padded_matrix = torch.zeros((B, C, S), dtype=torch.bool).to(device)
+
+                    with torch.no_grad():
+                        # Process in batches
+                        for i in range(0, B, batch_size):
+                            end = min(i + batch_size, B)
+                            batch_x = full_embeddings[i:end]
+                            batch_pad = padded_matrix[i:end]
+
+                            outputs, _ = staging_model(batch_x, batch_pad)
+                            # outputs shape: (Batch, Seq, Num_Classes) -> We likely want the classification for the epoch
+                            # Usually sleep staging is one label per 30s epoch.
+                            # If the model returns sequence, we might average or take last.
+                            # However, standard SleepFM staging usually outputs (Batch, Num_Classes) if configured for epoch classification
+                            # OR (Batch, Seq, Num_Classes) if dense.
+                            # Let's assume the model outputs (Batch, Num_Classes) based on the `fc` layer in `model.py`
+                            # Wait, `model.py` LSTM returns (B, S, num_classes).
+                            # We will take the mean over the sequence dimension S for the epoch label.
+
+                            logits = outputs.mean(dim=1)
+                            preds = torch.argmax(logits, dim=1).cpu().numpy()
+                            predictions.extend(preds)
+
+                    st.success("Analysis Complete!")
+
+                    # Map predictions to labels
+                    stage_map = {0: "Wake", 1: "N1", 2: "N2", 3: "N3", 4: "REM"}
+                    mapped_stages = [stage_map.get(p, "Unknown") for p in predictions]
+
+                    df_hypno = pd.DataFrame(
+                        {"Epoch": range(len(mapped_stages)), "Stage": mapped_stages}
                     )
-                    .properties(height=300)
-                )
 
-                st.altair_chart(chart, use_container_width=True)
+                    # Visualization
+                    st.subheader("Patient Hypnogram")
 
-                # Download
-                csv = df_hypno.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    "Download Hypnogram CSV",
-                    csv,
-                    "hypnogram.csv",
-                    "text/csv",
-                    key="download-csv",
-                )
+                    # Custom sorting for Y-axis to make Hypnogram look standard (Wake at top)
+                    stage_order = ["Wake", "REM", "N1", "N2", "N3"]
+
+                    chart = (
+                        alt.Chart(df_hypno)
+                        .mark_point()
+                        .encode(
+                            x=alt.X("Epoch:Q", title="Epoch"),
+                            y=alt.Y("Stage:O", sort=stage_order, title="Stage"),
+                        )
+                        .properties(height=300)
+                    )
+
+                    st.altair_chart(chart, use_container_width=True)
+
+                    # Download
+                    csv = df_hypno.to_csv(index=False).encode("utf-8")
+                    st.download_button(
+                        "Download Hypnogram CSV",
+                        csv,
+                        "hypnogram.csv",
+                        "text/csv",
+                        key="download-csv",
+                    )
