@@ -1,47 +1,39 @@
-import yaml
-import torch
-from torch import nn
-from loguru import logger
 import os
 import sys
-sys.path.append("../")
-from utils import *
-from models.dataset import SetTransformerDataset, collate_fn
-from models.models import SetTransformer
-import click
 import time
-import math
-import datetime
-import numpy as np
-import tqdm
-import shutil
-import wandb
+
+import click
 import h5py
+import torch
+import tqdm
+from loguru import logger
+
+from sleepfm.models.dataset import SetTransformerDataset, collate_fn
+from sleepfm.utils import count_parameters, load_config, load_data
 
 
 @click.command("generate_embeddings")
-@click.option("--model_path", type=str, default='path')
-@click.option("--dataset_name", type=str, default='mesa')
-@click.option("--channel_groups_path", type=str, default='../configs/channel_groups.json')
-@click.option("--split_path", type=str, default='../configs/dataset_split.json')
-@click.option("--splits", type=str, default='train,validation,test')
+@click.option("--model_path", type=str, default="path")
+@click.option("--dataset_name", type=str, default="mesa")
+@click.option(
+    "--channel_groups_path", type=str, default="../configs/channel_groups.json"
+)
+@click.option("--split_path", type=str, default="../configs/dataset_split.json")
+@click.option("--splits", type=str, default="train,validation,test")
 @click.option("--num_workers", type=int, default=16)
 @click.option("--batch_size", type=int, default=128)
 def generate_embeddings(
     model_path,
-    dataset_name, 
-    channel_groups_path, 
+    dataset_name,
+    channel_groups_path,
     split_path,
     splits,
-    num_workers, 
-    batch_size
+    num_workers,
+    batch_size,
 ):
     config_path = os.path.join(model_path, "config.json")
     config = load_config(config_path)
     channel_groups = load_data(channel_groups_path)
-
-    current_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-
     dataset_name = dataset_name.lower()
 
     output = os.path.join(model_path, f"{dataset_name}")
@@ -66,8 +58,9 @@ def generate_embeddings(
 
     logger.info(f"Batch Size: {batch_size}; Number of Workers: {num_workers}")
 
+    # TODO: Add support for CPU inference
     device = torch.device("cuda")
-    logger.info(f"Device set to Cuda")
+    logger.info("Device set to Cuda")
 
     start = time.time()
     split_dataset = load_data(split_path)
@@ -75,35 +68,52 @@ def generate_embeddings(
 
     if dataset_name.lower() in ["shhs1", "shhs2"]:
         path_to_data = os.path.join(data_path, f"SHHS/{dataset_name}")
-        hdf5_paths = [os.path.join(path_to_data, file_name) for file_name in os.listdir(path_to_data)]
+        hdf5_paths = [
+            os.path.join(path_to_data, file_name)
+            for file_name in os.listdir(path_to_data)
+        ]
     else:
         hdf5_paths = []
         for split in splits:
-            filtered_files = [fp for fp in split_dataset[split] if dataset_name in fp.lower()]
+            filtered_files = [
+                fp for fp in split_dataset[split] if dataset_name in fp.lower()
+            ]
             hdf5_paths += filtered_files
-        
+
         hdf5_paths = [os.path.join(data_path, file) for file in hdf5_paths]
 
     logger.info(f"Number of files to process: {len(hdf5_paths)}")
 
-    dataset = SetTransformerDataset(config, channel_groups, hdf5_paths=hdf5_paths, split="test")
-    dataloader = torch.utils.data.DataLoader(dataset, 
-                                             batch_size=batch_size, 
-                                             num_workers=num_workers, 
-                                             shuffle=False, 
-                                             collate_fn=collate_fn)
+    dataset = SetTransformerDataset(
+        config, channel_groups, hdf5_paths=hdf5_paths, split="test"
+    )
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        shuffle=False,
+        collate_fn=collate_fn,
+    )
 
     logger.info(f"Dataset loaded in {time.time() - start:.1f} seconds")
 
-    model_class = getattr(sys.modules[__name__], config['model'])
+    model_class = getattr(sys.modules[__name__], config["model"])
     logger.info(f"Model Class: {config['model']}")
-    model = model_class(in_channels, patch_size, embed_dim, num_heads, num_layers, pooling_head=pooling_head, dropout=dropout)
+    model = model_class(
+        in_channels,
+        patch_size,
+        embed_dim,
+        num_heads,
+        num_layers,
+        pooling_head=pooling_head,
+        dropout=dropout,
+    )
     if device.type == "cuda":
         model = torch.nn.DataParallel(model)
     model.to(device)
     total_layers, total_params = count_parameters(model)
-    logger.info(f'Trainable parameters: {total_params / 1e6:.2f} million')
-    logger.info(f'Number of layers: {total_layers}')
+    logger.info(f"Trainable parameters: {total_params / 1e6:.2f} million")
+    logger.info(f"Number of layers: {total_layers}")
 
     checkpoint = torch.load(os.path.join(model_path, "best.pt"))
     model.load_state_dict(checkpoint["state_dict"])
@@ -138,50 +148,86 @@ def generate_embeddings(
                 for i in range(len(file_paths)):
                     file_path = file_paths[i]
                     chunk_start = chunk_starts[i]
-                    subject_id = os.path.basename(file_path).split('.')[0]
+                    subject_id = os.path.basename(file_path).split(".")[0]
                     output_path = os.path.join(output_5min_agg, f"{subject_id}.hdf5")
 
-                    with h5py.File(output_path, 'a') as hdf5_file:
-                        for modality_idx, modality_type in enumerate(config["modality_types"]):
+                    with h5py.File(output_path, "a") as hdf5_file:
+                        for modality_idx, modality_type in enumerate(
+                            config["modality_types"]
+                        ):
                             if modality_type in hdf5_file:
                                 dset = hdf5_file[modality_type]
-                                chunk_start_correct = chunk_start // (embed_dim * 5 * 60)
-                                chunk_end = chunk_start_correct + embeddings_new[modality_idx][i].shape[0]
+                                chunk_start_correct = chunk_start // (
+                                    embed_dim * 5 * 60
+                                )
+                                chunk_end = (
+                                    chunk_start_correct
+                                    + embeddings_new[modality_idx][i].shape[0]
+                                )
                                 if dset.shape[0] < chunk_end:
-                                    dset.resize((chunk_end,) + embeddings_new[modality_idx][i].shape[1:])
-                                dset[chunk_start_correct:chunk_end] = embeddings_new[modality_idx][i].cpu().numpy()
+                                    dset.resize(
+                                        (chunk_end,)
+                                        + embeddings_new[modality_idx][i].shape[1:]
+                                    )
+                                dset[chunk_start_correct:chunk_end] = (
+                                    embeddings_new[modality_idx][i].cpu().numpy()
+                                )
                             else:
-                                hdf5_file.create_dataset(modality_type, data=embeddings_new[modality_idx][i].cpu().numpy(), chunks=(embed_dim,) + embeddings_new[modality_idx][i].shape[1:], maxshape=(None,) + embeddings_new[modality_idx][i].shape[1:])
+                                hdf5_file.create_dataset(
+                                    modality_type,
+                                    data=embeddings_new[modality_idx][i].cpu().numpy(),
+                                    chunks=(embed_dim,)
+                                    + embeddings_new[modality_idx][i].shape[1:],
+                                    maxshape=(None,)
+                                    + embeddings_new[modality_idx][i].shape[1:],
+                                )
 
                 embeddings_new = [e[1] for e in embeddings]
 
                 for i in range(len(file_paths)):
                     file_path = file_paths[i]
                     chunk_start = chunk_starts[i]
-                    subject_id = os.path.basename(file_path).split('.')[0]
+                    subject_id = os.path.basename(file_path).split(".")[0]
                     output_path = os.path.join(output, f"{subject_id}.hdf5")
 
-                    with h5py.File(output_path, 'a') as hdf5_file:
-                        for modality_idx, modality_type in enumerate(config["modality_types"]):
+                    with h5py.File(output_path, "a") as hdf5_file:
+                        for modality_idx, modality_type in enumerate(
+                            config["modality_types"]
+                        ):
                             if modality_type in hdf5_file:
                                 dset = hdf5_file[modality_type]
                                 chunk_start_correct = chunk_start // (embed_dim * 5)
-                                chunk_end = chunk_start_correct + embeddings_new[modality_idx][i].shape[0]
+                                chunk_end = (
+                                    chunk_start_correct
+                                    + embeddings_new[modality_idx][i].shape[0]
+                                )
                                 if dset.shape[0] < chunk_end:
-                                    dset.resize((chunk_end,) + embeddings_new[modality_idx][i].shape[1:])
-                                dset[chunk_start_correct:chunk_end] = embeddings_new[modality_idx][i].cpu().numpy()
+                                    dset.resize(
+                                        (chunk_end,)
+                                        + embeddings_new[modality_idx][i].shape[1:]
+                                    )
+                                dset[chunk_start_correct:chunk_end] = (
+                                    embeddings_new[modality_idx][i].cpu().numpy()
+                                )
                             else:
-                                hdf5_file.create_dataset(modality_type, data=embeddings_new[modality_idx][i].cpu().numpy(), chunks=(embed_dim,) + embeddings_new[modality_idx][i].shape[1:], maxshape=(None,) + embeddings_new[modality_idx][i].shape[1:])
+                                hdf5_file.create_dataset(
+                                    modality_type,
+                                    data=embeddings_new[modality_idx][i].cpu().numpy(),
+                                    chunks=(embed_dim,)
+                                    + embeddings_new[modality_idx][i].shape[1:],
+                                    maxshape=(None,)
+                                    + embeddings_new[modality_idx][i].shape[1:],
+                                )
                 pbar.update()
 
 
 class Identity(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     generate_embeddings()
