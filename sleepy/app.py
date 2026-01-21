@@ -886,8 +886,8 @@ if uploaded_file is not None:
             })
 
             bars = alt.Chart(df).mark_bar().encode(
-                x=alt.X("x:O", title="Index"),
-                y=alt.Y("height:Q", title="Height")
+                x=alt.X("x:O", title="Epoch"),
+                y=alt.Y("height:Q", title="Logit")
             )
 
             st.altair_chart(bars, use_container_width=True)
