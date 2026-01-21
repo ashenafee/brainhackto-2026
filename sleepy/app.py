@@ -3,13 +3,14 @@ import os
 import tempfile
 from collections import OrderedDict
 
+import matplotlib.pyplot as plt
 import altair as alt
 import h5py
 import numpy as np
 import pandas as pd
 import streamlit as st
 import torch
-from sleepfm.models.models import SetTransformer, SleepEventLSTMClassifier
+from sleepfm.models.models import SetTransformer, SleepEventLSTMClassifier, DiagnosisFinetuneFullLSTMCOXPHWithDemo
 from sleepfm.preprocessing.preprocessing import EDFToHDF5Converter
 
 # -----------------------------------------------------------------------------
@@ -20,10 +21,10 @@ FOUNDATION_MODEL_PATH = "../sleepfm/checkpoints/model_base"
 STAGING_MODEL_PATH = "../sleepfm/checkpoints/model_sleep_staging"
 DIAGNOSIS_MODEL_PATH = "../sleepfm/checkpoints/model_diagnosis"
 
-def load_foundation_model(device):
+def load_foundation_model(path, device):
     """Loads the SleepFM Foundation Model (SetTransformer)."""
-    config_path = os.path.join(FOUNDATION_MODEL_PATH, "config.json")
-    checkpoint_path = os.path.join(FOUNDATION_MODEL_PATH, "best.pt")
+    config_path = os.path.join(path, "config.json")
+    checkpoint_path = os.path.join(path, "best.pt")
 
     if not os.path.exists(config_path) or not os.path.exists(checkpoint_path):
         st.error(f"Model config {config_path} or checkpoint {checkpoint_path} not found. Please check the path.")
@@ -57,10 +58,10 @@ def load_foundation_model(device):
     return model, config
 
 
-def load_staging_model(device):
+def load_staging_model(path, device):
     """Loads the Sleep Staging Classifier."""
-    config_path = os.path.join(STAGING_MODEL_PATH, "config.json")
-    checkpoint_path = os.path.join(STAGING_MODEL_PATH, "best.pt")
+    config_path = os.path.join(path, "config.json")
+    checkpoint_path = os.path.join(path, "best.pt")
 
     if not os.path.exists(config_path) or not os.path.exists(checkpoint_path):
         # st.error("Staging model config or checkpoint not found.")
@@ -73,6 +74,38 @@ def load_staging_model(device):
 
     params = config["model_params"]
     model = SleepEventLSTMClassifier(**params)
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    # Remove 'module.' prefix
+    state_dict = checkpoint
+    new_state_dict = OrderedDict()
+    for k, v in state_dict.items():
+        name = k[7:] if k.startswith("module.") else k
+        new_state_dict[name] = v
+
+    model.load_state_dict(new_state_dict)
+    model.to(device)
+    model.eval()
+    return model
+
+
+def load_diagnosis_model(path, device):
+    """Loads the Sleep Staging Classifier."""
+    config_path = os.path.join(path, "config.json")
+    checkpoint_path = os.path.join(path, "best.pt")
+
+    if not os.path.exists(config_path) or not os.path.exists(checkpoint_path):
+        # st.error("Staging model config or checkpoint not found.")
+        st.error(f"Model config {config_path} or checkpoint {checkpoint_path} not found. Please check the path.")
+        
+        return None
+
+    with open(config_path, "r") as f:
+        config = json.load(f)
+
+    params = config["model_params"]
+    model = DiagnosisFinetuneFullLSTMCOXPHWithDemo(**params)
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
 
@@ -494,10 +527,16 @@ with st.sidebar:
     staging_model_path = st.text_input(
         "Staging Model Path", "../sleepfm/checkpoints/model_sleep_staging"
     )
+    diagnostic_model_path = st.text_input(
+        "Diagnostic Model Path", "../sleepfm/checkpoints/model_diagnosis"
+    )
 
     device_opt = st.selectbox("Device", ["cuda", "cpu", "mps"])
     if device_opt == "cuda" and not torch.cuda.is_available():
         st.warning("CUDA not available, falling back to CPU")
+        device_opt = "cpu"
+    if device_opt == "mps" and not torch.mps.is_available():
+        st.warning("MPS not available, falling back to CPU")
         device_opt = "cpu"
 
     device = torch.device(device_opt)
@@ -556,14 +595,14 @@ if uploaded_file is not None:
         # ---------------------------------------------------------------------
         st.header("🧠 Sleep Stage Analysis")
 
-        foundation_model_tab, sleep_staging_tab, diagnostic_tab = st.tabs(["Foundation model", "Sleep staging", "Diagnostic"])
+        sleep_staging_tab, diagnostic_tab = st.tabs(["Sleep staging", "Diagnostic"])
         
-        with foundation_model_tab:
+        with sleep_staging_tab:
 
             # 3. Embedding Generation
             st.text("Loading Foundation Model & Generating Embeddings...")
 
-            foundation_model, fm_config = load_foundation_model(device)
+            foundation_model, fm_config = load_foundation_model(base_model_path, device)
 
             if foundation_model:
                 # Prepare tensors
@@ -644,7 +683,7 @@ if uploaded_file is not None:
 
                 # 4. Staging Inference
                 st.text("Predicting Sleep Stages...")
-                staging_model = load_staging_model(device)
+                staging_model = load_staging_model(staging_model_path, device)
 
                 if staging_model:
                     predictions = []
@@ -713,3 +752,142 @@ if uploaded_file is not None:
                         "text/csv",
                         key="download-csv",
                     )
+
+        with diagnostic_tab:
+
+            # 3. Embedding Generation
+            st.text("Loading Foundation Model & Generating Embeddings...")
+
+            foundation_model, fm_config = load_foundation_model(base_model_path, device)
+
+            if foundation_model:
+                # Prepare tensors
+                # Shape: (Batch, 1, Samples) - Model expects (B, C, T)
+                t_bas = (
+                    torch.tensor(epoch_data["bas"], dtype=torch.float)
+                    .unsqueeze(1)
+                    .to(device)
+                )
+                t_resp = (
+                    torch.tensor(epoch_data["resp"], dtype=torch.float)
+                    .unsqueeze(1)
+                    .to(device)
+                )
+                t_ekg = (
+                    torch.tensor(epoch_data["ekg"], dtype=torch.float)
+                    .unsqueeze(1)
+                    .to(device)
+                )
+                t_emg = (
+                    torch.tensor(epoch_data["emg"], dtype=torch.float)
+                    .unsqueeze(1)
+                    .to(device)
+                )
+
+                # Create dummy masks (assuming all data is valid for this demo)
+                # Mask shape logic from generate_embeddings.py seems to imply boolean mask
+                # Here we create a mask of False (no padding)
+                mask = torch.zeros((num_epochs, 1), dtype=torch.bool).to(device)
+
+                batch_size = 16
+                embeddings_list = []
+
+                progress_bar = st.progress(0)
+
+                with torch.no_grad():
+                    for i in range(0, num_epochs, batch_size):
+                        end = min(i + batch_size, num_epochs)
+
+                        # Get batch
+                        b_bas = t_bas[i:end]
+                        b_resp = t_resp[i:end]
+                        b_ekg = t_ekg[i:end]
+                        b_emg = t_emg[i:end]
+                        b_mask = mask[i:end]
+
+                        # Forward pass for each modality
+                        # Model returns (x, embedding). We want the embedding (index 1)
+                        # Note: generate_embeddings.py uses index 1 for 5-min agg, index 0 for granular
+                        # Staging usually uses the granular sequence or aggregated.
+                        # Based on notebook: "embeddings_new = [e[0].unsqueeze(1) for e in embeddings]" for granular
+
+                        emb_bas = foundation_model(b_bas, b_mask)[1]
+                        emb_resp = foundation_model(b_resp, b_mask)[1]
+                        emb_ekg = foundation_model(b_ekg, b_mask)[1]
+                        emb_emg = foundation_model(b_emg, b_mask)[1]
+
+                        # Stack modalities: (Batch, Seq, Embed) -> (Batch, Modalities*Seq, Embed) ??
+                        # Or simply concatenate. The Staging model expects a specific input structure.
+                        # In the notebook, it saves separate HDF5 datasets per modality.
+                        # The staging dataset loader usually concatenates them.
+
+                        # For simplicity in this app, we concatenate along the sequence dimension
+                        # or feature dimension depending on how the staging model was trained.
+                        # Assuming Staging Model takes (Batch, Modalities, Seq, Embed) or similar.
+                        # Let's look at SleepEventLSTMClassifier forward: input x is (B, C, S, E).
+
+                        batch_emb = torch.stack(
+                            [emb_bas, emb_resp, emb_ekg, emb_emg], dim=1
+                        )
+                        embeddings_list.append(batch_emb)
+
+                        progress_bar.progress(end / num_epochs)
+
+                full_embeddings = torch.cat(
+                    embeddings_list, dim=0
+                )  # (Total_Epochs, 4, Seq, Embed)
+
+                # 4. Diagnosis Inference
+                diagnosis_model = load_diagnosis_model(diagnostic_model_path, device)
+
+                if diagnosis_model:
+                    st.text("Producing diagnosis...")
+                    predictions = []
+
+                    # Create padded matrix mask for staging model
+                    # Shape: (Batch, Modalities, Seq)
+                    # Since we have no padding, it's all False (valid)
+                    B, C, S, E = full_embeddings.shape
+                    padded_matrix = torch.zeros((B, C, S), dtype=torch.bool).to(device)
+                    
+                    mean_age = 30 
+                    std_age = 2
+                    sex_info = torch.randint(0, 2, size=())
+                    age_info = torch.normal(mean=mean_age, std=std_age, size=())
+                    demo_info = torch.tensor([[sex_info, age_info]]*B).to(device)
+
+                    preds = []
+                    labels = []
+                    with torch.no_grad():
+                        # Process in batches
+                        for i in range(0, B, batch_size):
+
+                            end = min(i + batch_size, B)
+                            batch_x = full_embeddings[i:end]
+                            batch_pad = padded_matrix[i:end]
+                            demo_batch = demo_info[i:end]
+
+                            outputs = diagnosis_model(batch_x, batch_pad, demo_batch)
+
+                            pred, label = torch.max(outputs, 1)
+
+                            preds.extend(pred.tolist())
+                            labels.extend(label.tolist())
+
+            st.success("Analysis Complete!")
+            
+            mapping = pd.read_csv('../sleepfm/configs/label_mapping.csv')
+            phenotypes = [mapping[mapping.label_idx == label].phenotype.iloc[0] for label in labels]
+
+            df = pd.DataFrame({
+                "x": np.arange(len(preds)),
+                "height": preds,
+                "phenotypes": phenotypes
+            })
+
+            bars = alt.Chart(df).mark_bar().encode(
+                x=alt.X("x:O", title="Index"),
+                y=alt.Y("height:Q", title="Height")
+            )
+
+            st.altair_chart(bars, use_container_width=True)
